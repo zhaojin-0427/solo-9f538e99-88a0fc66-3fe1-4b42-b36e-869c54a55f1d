@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}批次 {{ batch.token }} · 修订 {{ version.revision }}{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>批次 {{ batch.label or batch.token }}</h1>
+  <dl class="facts">
+    <div><dt>批次标识</dt><dd class="mono">{{ batch.token }}</dd></div>
+    <div><dt>当前修订</dt><dd>{{ batch.current_revision }}</dd></div>
+    <div><dt>查看修订</dt><dd>{{ version.revision }}{% if is_current %}（当前）{% endif %}</dd></div>
+    <div><dt>样本数</dt><dd>{{ batch.sample_count }}</dd></div>
+    <div><dt>结果行数</dt><dd>{{ version.result_rows }}</dd></div>
+    <div><dt>结果 SHA-256</dt><dd class="mono small">{{ version.result_sha256 }}</dd></div>
+    <div><dt>发布时间（UTC）</dt><dd class="mono small">{{ version.created_at }}</dd></div>
+  </dl>
+  <p>
+    <a class="button" href="{{ url_for('download_revision', token=batch.token, revision=version.revision) }}">下载修订 {{ version.revision }} 结果 CSV</a>
+    {% if not is_current %}
+      <a class="button" href="{{ url_for('batch_detail', token=batch.token) }}">返回当前修订</a>
+    {% endif %}
+  </p>
+</section>
+
+<section class="panel">
+  <h1>修订历史</h1>
+  <table class="grid">
+    <thead><tr><th>修订</th><th>结果行数</th><th>结果大小</th><th>发布时间（UTC）</th><th></th></tr></thead>
+    <tbody>
+      {% for item in versions %}
+      <tr {% if item.id == version.id %}class="selected"{% endif %}>
+        <td>{{ item.revision }}{% if item.revision == batch.current_revision %} · 当前{% endif %}</td>
+        <td>{{ item.result_rows }}</td>
+        <td>{{ item.result_size }} B</td>
+        <td class="mono small">{{ item.created_at }}</td>
+        <td>
+          <a href="{{ url_for('batch_revision', token=batch.token, revision=item.revision) }}">查看</a>
+          <a href="{{ url_for('download_revision', token=batch.token, revision=item.revision) }}">下载</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h1>更正：仅上传更高修订的完整校准单</h1>
+  <p class="hint">使用留存的原始样本数据重算整批结果。低于当前修订或同号不同内容会被拒绝；并发更正按提交时的当前修订判定。</p>
+  <form method="post" action="{{ url_for('correct_batch', token=batch.token) }}" enctype="multipart/form-data" class="stack">
+    <label>新修订号（正整数）
+      <input type="text" name="revision" inputmode="numeric" required value="{{ form.revision }}">
+    </label>
+    <label>完整校准 CSV
+      <input type="file" name="calibration_csv" accept=".csv,text/csv" required>
+    </label>
+    <button type="submit">重算并发布</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h1>本次修订使用的校准</h1>
+  {% if calibrations %}
+  <table class="grid">
+    <thead><tr><th>起始（含）</th><th>结束（不含）</th><th>斜率</th><th>截距</th></tr></thead>
+    <tbody>
+      {% for item in calibrations %}
+      <tr>
+        <td class="mono small">{{ item.start }}</td>
+        <td class="mono small">{{ item.end }}</td>
+        <td>{{ item.slope }}</td>
+        <td>{{ item.intercept }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="hint">无校准记录。</p>{% endif %}
+</section>
+
+<section class="panel">
+  <h1>结果明细（前 {{ preview_rows }} 行）</h1>
+  {% if rows %}
+  <table class="grid">
+    <thead><tr><th>样本号</th><th>UTC 时刻</th><th>吸光度</th><th>斜率</th><th>截距</th><th>浓度</th></tr></thead>
+    <tbody>
+      {% for row in rows[:preview_rows] %}
+      <tr>
+        <td>{{ row.sample_id }}</td>
+        <td class="mono small">{{ row.timestamp_utc }}</td>
+        <td>{{ row.absorbance }}</td>
+        <td>{{ row.slope }}</td>
+        <td>{{ row.intercept }}</td>
+        <td>{{ row.concentration }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if rows|length > preview_rows %}<p class="hint">仅预览前 {{ preview_rows }} 行，完整内容请下载 CSV。</p>{% endif %}
+  {% else %}<p class="hint">无结果行。</p>{% endif %}
+</section>
+{% endblock %}

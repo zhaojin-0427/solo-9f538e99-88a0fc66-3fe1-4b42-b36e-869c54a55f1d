@@ -1,0 +1,17 @@
+services:
+  lab:
+    build: .
+    image: env-lab-concentration:local
+    container_name: env-lab-concentration
+    ports:
+      - "${LAB_PORT:-8000}:8000"
+    environment:
+      LAB_SECRET_KEY: "${LAB_SECRET_KEY:-change-me-in-production}"
+      LAB_DATABASE: /app/data/lab.sqlite3
+      LAB_RESULTS_DIR: /app/data/results
+    volumes:
+      - lab-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  lab-data:

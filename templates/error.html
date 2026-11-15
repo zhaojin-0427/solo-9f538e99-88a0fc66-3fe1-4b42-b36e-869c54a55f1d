@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}出错了{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>无法完成请求</h1>
+  <p class="notice error">{{ message }}</p>
+  <p><a class="button" href="{{ url_for('index') }}">返回批次列表</a></p>
+</section>
+{% endblock %}

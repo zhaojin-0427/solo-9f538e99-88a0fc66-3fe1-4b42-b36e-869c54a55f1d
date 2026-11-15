@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h1>首次上传：原始样本 + 校准</h1>
+  <p class="hint">
+    原始样本 CSV 列：样本号、UTC 时刻、吸光度；校准 CSV 列：起始 UTC 时刻、结束 UTC 时刻、斜率、截距。
+    每份 CSV 最多 {{ max_rows }} 行数据。校准区间为起始含、结束不含，样本必须恰好命中一段；
+    区间重叠、样本无校准、样本号重复或浓度为负都会整批拒绝。
+  </p>
+  <form method="post" action="{{ url_for('create_batch') }}" enctype="multipart/form-data" class="stack">
+    <label>批次名称（可选）
+      <input type="text" name="label" maxlength="120" value="{{ form.label if form else '' }}" placeholder="例如：2026-11 水质吸光度">
+    </label>
+    <label>修订号（正整数，作为首次发布版本）
+      <input type="text" name="revision" inputmode="numeric" required value="{{ form.revision if form else '1' }}">
+    </label>
+    <label>原始样本 CSV
+      <input type="file" name="samples_csv" accept=".csv,text/csv" required>
+    </label>
+    <label>校准 CSV
+      <input type="file" name="calibration_csv" accept=".csv,text/csv" required>
+    </label>
+    <button type="submit">校验并发布</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h1>已发布批次</h1>
+  {% if batches %}
+  <table class="grid">
+    <thead>
+      <tr><th>批次</th><th>当前修订</th><th>样本数</th><th>结果行数</th><th>创建时间（UTC）</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for batch in batches %}
+      <tr>
+        <td><a href="{{ url_for('batch_detail', token=batch.token) }}">{{ batch.label or batch.token }}</a>
+          <div class="mono small">{{ batch.token }}</div></td>
+        <td>{{ batch.current_revision }}</td>
+        <td>{{ batch.sample_count }}</td>
+        <td>{{ batch.result_rows }}</td>
+        <td class="mono small">{{ batch.created_at }}</td>
+        <td><a class="button" href="{{ url_for('download_current', token=batch.token) }}">下载 CSV</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">尚无批次。</p>
+  {% endif %}
+  <form method="post" action="{{ url_for('maintenance_cleanup') }}">
+    <button type="submit" class="secondary">清理未发布的遗留文件</button>
+  </form>
+</section>
+{% endblock %}
