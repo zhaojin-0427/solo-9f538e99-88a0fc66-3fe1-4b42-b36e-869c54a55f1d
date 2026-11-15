@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}撤回批次 {{ batch.token }}{% endblock %}
+{% block content %}
+<section class="panel danger">
+  <h1>撤回批次：{{ batch.label or batch.token }}</h1>
+  <p class="notice error">
+    <strong>撤回不可撤销。</strong>撤回生效后立即阻断该批当前与全部历史修订的详情、下载与校准更正；
+    数据卷中该批各修订的结果 CSV 将被逐份删除，原始样本、结果正文与版本记录最终从 SQLite 清除。
+    其他批次不受影响。
+  </p>
+  {% if confirm_errors %}
+    <div class="notice error">
+      <ul>
+        {% for message in confirm_errors %}<li>{{ message }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+  <dl class="facts">
+    <div><dt>批次标识</dt><dd class="mono">{{ batch.token }}</dd></div>
+    <div><dt>当前修订</dt><dd>{{ batch.current_revision }}</dd></div>
+    <div><dt>样本数</dt><dd>{{ batch.sample_count }}</dd></div>
+    <div><dt>创建时间（UTC）</dt><dd class="mono small">{{ batch.created_at }}</dd></div>
+  </dl>
+
+  <h2>将逐份删除的结果文件（{{ versions|length }} 份）</h2>
+  <table class="grid">
+    <thead><tr><th>修订</th><th>数据卷文件</th><th>大小</th><th>结果 SHA-256</th></tr></thead>
+    <tbody>
+      {% for item in versions %}
+      <tr>
+        <td>{{ item.revision }}</td>
+        <td class="mono small">{{ item.file_path }}</td>
+        <td>{{ item.result_size }} B</td>
+        <td class="mono small">{{ item.result_sha256 }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <form method="post" action="{{ url_for('withdraw_batch', token=batch.token) }}" class="stack">
+    <label>输入批次标识 <span class="mono">{{ batch.token }}</span> 以确认撤回整批
+      <input type="text" name="confirm_token" required autocomplete="off" spellcheck="false" placeholder="{{ batch.token }}">
+    </label>
+    <div>
+      <button type="submit" class="danger">确认撤回整批（含全部 {{ versions|length }} 个修订）</button>
+      <a class="button secondary" href="{{ url_for('batch_detail', token=batch.token) }}">取消，返回批次</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

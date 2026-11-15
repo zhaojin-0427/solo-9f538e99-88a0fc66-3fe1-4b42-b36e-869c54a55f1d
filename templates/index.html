@@ -29,18 +29,39 @@
   {% if batches %}
   <table class="grid">
     <thead>
-      <tr><th>批次</th><th>当前修订</th><th>样本数</th><th>结果行数</th><th>创建时间（UTC）</th><th></th></tr>
+      <tr><th>批次</th><th>状态</th><th>当前修订</th><th>样本数</th><th>结果行数</th><th>创建时间（UTC）</th><th></th></tr>
     </thead>
     <tbody>
       {% for batch in batches %}
       <tr>
-        <td><a href="{{ url_for('batch_detail', token=batch.token) }}">{{ batch.label or batch.token }}</a>
-          <div class="mono small">{{ batch.token }}</div></td>
+        <td>
+          {% if batch.withdrawn_at %}
+            {{ batch.label or batch.token }}<span class="tag-danger">已撤回</span>
+          {% else %}
+            <a href="{{ url_for('batch_detail', token=batch.token) }}">{{ batch.label or batch.token }}</a>
+          {% endif %}
+          <div class="mono small">{{ batch.token }}</div>
+        </td>
+        {% if batch.withdrawn_at %}
+        <td>
+          已撤回
+          {% if batch.pending_files %}<div class="small">待回收 {{ batch.pending_files }} 个文件</div>{% endif %}
+          <div class="mono small">{{ batch.withdrawn_at }}</div>
+        </td>
+        <td colspan="3" class="hint">详情、下载与更正已阻断</td>
+        <td class="mono small">{{ batch.created_at }}</td>
+        <td>—</td>
+        {% else %}
+        <td>发布中</td>
         <td>{{ batch.current_revision }}</td>
         <td>{{ batch.sample_count }}</td>
         <td>{{ batch.result_rows }}</td>
         <td class="mono small">{{ batch.created_at }}</td>
-        <td><a class="button" href="{{ url_for('download_current', token=batch.token) }}">下载 CSV</a></td>
+        <td>
+          <a class="button" href="{{ url_for('download_current', token=batch.token) }}">下载 CSV</a>
+          <a class="button secondary" href="{{ url_for('withdraw_confirm', token=batch.token) }}">撤回…</a>
+        </td>
+        {% endif %}
       </tr>
       {% endfor %}
     </tbody>

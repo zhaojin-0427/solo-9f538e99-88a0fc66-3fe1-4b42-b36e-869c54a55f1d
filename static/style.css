@@ -72,6 +72,23 @@ button, .button {
 button:hover, .button:hover { background: var(--accent-dark); }
 button.secondary { background: #fff; color: var(--accent); }
 button.secondary:hover { background: #eef5fa; }
+.button.secondary { background: #fff; color: var(--accent); }
+.button.secondary:hover { background: #eef5fa; }
+button.danger, .button.danger { background: #a33333; border-color: #a33333; color: #fff; }
+button.danger:hover, .button.danger:hover { background: #7e2626; }
+.panel.danger { border-color: var(--danger-line); }
+.tag-danger {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 0.08rem 0.55rem;
+  margin-left: 0.45rem;
+  border-radius: 999px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-line);
+  color: #8a2b2b;
+  vertical-align: middle;
+}
+.notice.info { background: #eef5fa; border-color: #b7d3e6; }
 .notice {
   border-radius: 8px;
   padding: 0.75rem 1rem;

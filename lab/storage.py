@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from .errors import ConflictError, NotFoundError, PublishError
+from .errors import ConflictError, NotFoundError, PublishError, WithdrawnError
 from .parsing import (
     Calibration,
     ResultRow,
@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS batches (
     label TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     current_revision INTEGER,
-    current_version_id INTEGER
+    current_version_id INTEGER,
+    withdrawn_at TEXT
 );
 CREATE TABLE IF NOT EXISTS samples (
     batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
@@ -78,7 +79,18 @@ CREATE TABLE IF NOT EXISTS results (
     concentration TEXT NOT NULL,
     PRIMARY KEY (version_id, seq)
 );
+-- 撤回时逐份登记的待删文件路径：只有确认实际删除后才移除对应行，
+-- 因此崩溃/重启后可按留存路径继续回收，且与数据卷文件逐份对应。
+CREATE TABLE IF NOT EXISTS withdrawn_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+    token TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    registered_at TEXT NOT NULL,
+    UNIQUE (batch_id, file_path)
+);
 CREATE INDEX IF NOT EXISTS idx_versions_batch ON versions(batch_id, revision);
+CREATE INDEX IF NOT EXISTS idx_withdrawn_files_batch ON withdrawn_files(batch_id);
 """
 
 
@@ -93,6 +105,8 @@ class BatchInfo:
     sample_count: int
     result_rows: int
     result_sha256: str
+    withdrawn_at: str | None = None
+    pending_files: int = 0
 
 
 @dataclass(frozen=True)
@@ -169,6 +183,8 @@ class Store:
         self._lock = threading.RLock()
         self._init_schema()
         self._lock_file = self._open_lock_file()
+        # 启动即按 SQLite 留存的待删路径继续回收（崩溃恢复），再清理未登记文件。
+        self.resume_withdrawals()
         self.cleanup_unpublished()
 
     def _open_lock_file(self):
@@ -231,6 +247,10 @@ class Store:
             # 避免每条连接都请求独占锁。
             db.execute("PRAGMA journal_mode = WAL")
             db.executescript(SCHEMA)
+            # 兼容既有数据卷：老库缺少撤回状态列时原地补齐。
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(batches)").fetchall()}
+            if "withdrawn_at" not in columns:
+                db.execute("ALTER TABLE batches ADD COLUMN withdrawn_at TEXT")
 
     # ---------- 查询 ----------
 
@@ -241,6 +261,9 @@ class Store:
                 return None
             sample_count = db.execute(
                 "SELECT COUNT(*) AS n FROM samples WHERE batch_id = ?", (batch["id"],)
+            ).fetchone()["n"]
+            pending_files = db.execute(
+                "SELECT COUNT(*) AS n FROM withdrawn_files WHERE batch_id = ?", (batch["id"],)
             ).fetchone()["n"]
             current = db.execute(
                 "SELECT result_rows, result_sha256 FROM versions WHERE id = ?",
@@ -256,6 +279,8 @@ class Store:
                 sample_count=sample_count,
                 result_rows=current["result_rows"] if current else 0,
                 result_sha256=current["result_sha256"] if current else "",
+                withdrawn_at=batch["withdrawn_at"],
+                pending_files=pending_files,
             )
 
     def list_batches(self) -> list[BatchInfo]:
@@ -264,11 +289,14 @@ class Store:
                 """
                 SELECT b.*, COALESCE(s.n, 0) AS sample_count,
                        COALESCE(v.result_rows, 0) AS result_rows,
-                       COALESCE(v.result_sha256, '') AS result_sha256
+                       COALESCE(v.result_sha256, '') AS result_sha256,
+                       COALESCE(w.n, 0) AS pending_files
                 FROM batches b
                 LEFT JOIN (SELECT batch_id, COUNT(*) AS n FROM samples GROUP BY batch_id) s
                        ON s.batch_id = b.id
                 LEFT JOIN versions v ON v.id = b.current_version_id
+                LEFT JOIN (SELECT batch_id, COUNT(*) AS n FROM withdrawn_files GROUP BY batch_id) w
+                       ON w.batch_id = b.id
                 ORDER BY b.created_at DESC, b.id DESC
                 """
             ).fetchall()
@@ -283,15 +311,23 @@ class Store:
                 sample_count=row["sample_count"],
                 result_rows=row["result_rows"],
                 result_sha256=row["result_sha256"],
+                withdrawn_at=row["withdrawn_at"],
+                pending_files=row["pending_files"],
             )
             for row in rows
         ]
+
+    @staticmethod
+    def _raise_if_withdrawn(batch_row: sqlite3.Row) -> None:
+        if batch_row["withdrawn_at"] is not None:
+            raise WithdrawnError("该批次已撤回，详情、下载与更正均已阻断")
 
     def get_version(self, token: str, revision: int | None = None) -> tuple[BatchInfo, VersionInfo] | None:
         with self._read() as db:
             batch_row = db.execute("SELECT * FROM batches WHERE token = ?", (token,)).fetchone()
             if batch_row is None:
                 return None
+            self._raise_if_withdrawn(batch_row)
             if revision is None:
                 version_row = db.execute(
                     "SELECT * FROM versions WHERE id = ?", (batch_row["current_version_id"],)
@@ -323,9 +359,10 @@ class Store:
 
     def list_versions(self, token: str) -> list[VersionInfo] | None:
         with self._read() as db:
-            batch_row = db.execute("SELECT id FROM batches WHERE token = ?", (token,)).fetchone()
+            batch_row = db.execute("SELECT * FROM batches WHERE token = ?", (token,)).fetchone()
             if batch_row is None:
                 return None
+            self._raise_if_withdrawn(batch_row)
             rows = db.execute(
                 "SELECT * FROM versions WHERE batch_id = ? ORDER BY revision DESC",
                 (batch_row["id"],),
@@ -337,6 +374,7 @@ class Store:
             batch_row = db.execute("SELECT * FROM batches WHERE token = ?", (token,)).fetchone()
             if batch_row is None:
                 return None
+            self._raise_if_withdrawn(batch_row)
             if batch_row["current_version_id"] is None:
                 raise NotFoundError("该批次尚无已发布版本")
             rows = db.execute(
@@ -370,12 +408,16 @@ class Store:
             return batch, samples, version_from_row(version_row)
 
     def download(self, token: str, revision: int | None = None) -> tuple[BatchInfo, VersionInfo, bytes] | None:
-        found = self.get_version(token, revision)
-        if found is None:
-            return None
-        batch, version = found
-        content = self._read_published(version)
-        return batch, version, content
+        # 共享锁包住“撤回检查 + 读取并校验完整文件”：撤回回收持独占锁，
+        # 会等待进行中的下载取得完整原文件；撤回登记后的新下载在
+        # get_version 处即被拒绝，绝不会读到被回收的文件。
+        with self._cross_process_lock(False):
+            found = self.get_version(token, revision)
+            if found is None:
+                return None
+            batch, version = found
+            content = self._read_published(version)
+            return batch, version, content
 
     def _read_published(self, version: VersionInfo) -> bytes:
         """校验磁盘文件与发布记录，任何不一致都视为该版本不可用。"""
@@ -503,6 +545,9 @@ class Store:
                 ).fetchone()
                 if batch_row is None:
                     raise NotFoundError("批次不存在")
+                # 与撤回交错：撤回登记与本事务都持独占锁串行提交，
+                # 此处再次确认，保证撤回生效后绝不重新发布。
+                self._raise_if_withdrawn(batch_row)
                 batch_id = batch_row["id"]
                 current_revision = batch_row["current_revision"]
                 if current_revision is None:
@@ -556,6 +601,109 @@ class Store:
         found = self.get_version(token, revision)
         assert batch is not None and found is not None
         return batch, found[1], idempotent
+
+    # ---------- 撤回：登记 + 逐份回收 ----------
+
+    def begin_withdrawal(self, token: str) -> tuple[BatchInfo, list[str], bool]:
+        """登记撤回：同一事务内持久写入撤回状态与每个待删文件路径。
+
+        提交瞬间该批即被阻断（详情/下载/更正），随后由 resume_withdrawals
+        按登记路径逐份回收。返回 (批次, 本次登记的待删路径, 是否此前已撤回)。
+        """
+        with self._cross_process_lock(True), self.write_transaction() as db:
+            batch_row = db.execute(
+                "SELECT * FROM batches WHERE token = ?", (token,)
+            ).fetchone()
+            if batch_row is None:
+                raise NotFoundError("批次不存在")
+            if batch_row["withdrawn_at"] is not None:
+                already = True
+                paths: list[str] = []
+            else:
+                already = False
+                rows = db.execute(
+                    "SELECT file_path FROM versions WHERE batch_id = ? ORDER BY revision",
+                    (batch_row["id"],),
+                ).fetchall()
+                now = _now()
+                for row in rows:
+                    db.execute(
+                        """INSERT OR IGNORE INTO withdrawn_files
+                           (batch_id, token, file_path, registered_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (batch_row["id"], token, row["file_path"], now),
+                    )
+                db.execute(
+                    "UPDATE batches SET withdrawn_at = ? WHERE id = ?",
+                    (now, batch_row["id"]),
+                )
+                paths = [row["file_path"] for row in rows]
+        batch = self.get_batch(token)
+        assert batch is not None
+        return batch, paths, already
+
+    def _reclaim_path(self, file_rel: str) -> bool:
+        """删除单个待回收文件；确认磁盘上已不存在才返回 True。"""
+        root = self.results_dir.resolve()
+        path = (root / file_rel).resolve()
+        if root not in path.parents:
+            return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return True  # 文件已不存在，视为删除完成
+        except OSError:
+            return False
+        return True
+
+    def resume_withdrawals(self) -> dict[str, list[str]]:
+        """按 SQLite 留存的待删路径逐份回收，随后清除该批样本/结果/版本记录。
+
+        撤回登记后、回收完成前进程中断也没关系：重启或再次触发时按
+        withdrawn_files 中留存的路径继续；只有确认实际删除的路径才移除登记，
+        全部路径回收完毕才清除 SQLite 内的样本、结果正文与版本记录。
+        独占锁与下载的共享锁互斥，进行中的下载可完整读完后回收才开始。
+        """
+        summary: dict[str, list[str]] = {"deleted": [], "failed": [], "purged": []}
+        with self._cross_process_lock(True):
+            with self._read() as db:
+                rows = db.execute(
+                    "SELECT id, file_path FROM withdrawn_files ORDER BY id"
+                ).fetchall()
+            for row in rows:
+                if not self._reclaim_path(row["file_path"]):
+                    summary["failed"].append(row["file_path"])
+                    continue  # 删除失败：留存路径，等待下次回收
+                with self.write_transaction() as db:
+                    db.execute("DELETE FROM withdrawn_files WHERE id = ?", (row["id"],))
+                summary["deleted"].append(row["file_path"])
+
+            # 待删路径已全部回收的撤回批次：清除样本、结果正文与版本记录。
+            purged_tokens: list[str] = []
+            with self.write_transaction() as db:
+                finished = db.execute(
+                    """SELECT b.id, b.token FROM batches b
+                       WHERE b.withdrawn_at IS NOT NULL
+                         AND NOT EXISTS (
+                             SELECT 1 FROM withdrawn_files w WHERE w.batch_id = b.id
+                         )"""
+                ).fetchall()
+                for item in finished:
+                    db.execute("DELETE FROM samples WHERE batch_id = ?", (item["id"],))
+                    # results 经外键 ON DELETE CASCADE 随 versions 一并清除。
+                    db.execute("DELETE FROM versions WHERE batch_id = ?", (item["id"],))
+                    db.execute(
+                        "UPDATE batches SET current_version_id = NULL WHERE id = ?",
+                        (item["id"],),
+                    )
+                    purged_tokens.append(item["token"])
+            summary["purged"] = purged_tokens
+            for purged in purged_tokens:
+                try:
+                    (self.results_dir / purged).rmdir()
+                except OSError:
+                    pass
+        return summary
 
     # ---------- 内部 ----------
 

@@ -31,3 +31,7 @@ class PublishError(LabError):
 
 class NotFoundError(LabError):
     """批次 / 修订不存在。"""
+
+
+class WithdrawnError(LabError):
+    """批次已撤回：详情、下载与更正一律阻断。"""

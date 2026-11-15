@@ -55,6 +55,13 @@
   </form>
 </section>
 
+<section class="panel danger">
+  <h1>撤回批次</h1>
+  <p class="hint">原始 CSV 误含敏感样本号等情况需整批撤回：撤回立即阻断该批当前与历史修订的详情、下载与更正，
+    数据卷中各修订结果 CSV 逐份删除，原始样本与版本记录最终从 SQLite 清除。此操作不可撤销。</p>
+  <a class="button danger" href="{{ url_for('withdraw_confirm', token=batch.token) }}">撤回该批次…</a>
+</section>
+
 <section class="panel">
   <h1>本次修订使用的校准</h1>
   {% if calibrations %}

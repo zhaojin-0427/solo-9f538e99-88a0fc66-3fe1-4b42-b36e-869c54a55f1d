@@ -17,7 +17,14 @@ from flask import (
 )
 from werkzeug.exceptions import RequestEntityTooLarge
 
-from .errors import ConflictError, InputError, LabError, NotFoundError, PublishError
+from .errors import (
+    ConflictError,
+    InputError,
+    LabError,
+    NotFoundError,
+    PublishError,
+    WithdrawnError,
+)
 from .parsing import (
     MAX_DATA_ROWS,
     parse_calibrations,
@@ -160,10 +167,65 @@ def create_app(config: dict | None = None) -> Flask:
     def download_revision(token: str, revision: int):
         return _download(token, revision)
 
+    @app.get("/batches/<token>/withdraw")
+    def withdraw_confirm(token: str):
+        batch = store.get_batch(token)
+        if batch is None:
+            return _render_error("批次不存在", 404)
+        if batch.withdrawn_at is not None:
+            flash(f"批次 {token} 已撤回，无需重复操作。", "info")
+            return redirect(url_for("index"))
+        return render_template(
+            "withdraw.html",
+            batch=batch,
+            versions=store.list_versions(token) or [],
+            confirm_errors=[],
+        )
+
+    @app.post("/batches/<token>/withdraw")
+    def withdraw_batch(token: str):
+        batch = store.get_batch(token)
+        if batch is None:
+            return _render_error("批次不存在", 404)
+        confirm = (request.form.get("confirm_token") or "").strip()
+        if batch.withdrawn_at is None and confirm != token:
+            return (
+                render_template(
+                    "withdraw.html",
+                    batch=batch,
+                    versions=store.list_versions(token) or [],
+                    confirm_errors=["确认标识与批次标识不一致，撤回未执行。"],
+                ),
+                400,
+            )
+        _, paths, already = store.begin_withdrawal(token)
+        # 登记后立即尝试逐份回收；失败的路径留存在 SQLite，重启后继续。
+        summary = store.resume_withdrawals()
+        if summary["failed"]:
+            flash(
+                f"批次 {token} 已撤回并阻断访问；{len(summary['failed'])} 个结果文件"
+                "删除失败，已留存待删路径，将在重启后继续回收。",
+                "error",
+            )
+        elif already:
+            flash(f"批次 {token} 此前已撤回，本次已继续完成文件回收。", "info")
+        else:
+            flash(
+                f"批次 {token} 已撤回：{len(paths)} 份结果文件已逐份删除，"
+                "原始样本、结果正文与版本记录已清除。",
+                "success",
+            )
+        return redirect(url_for("index"))
+
     @app.post("/maintenance/cleanup")
     def maintenance_cleanup():
+        summary = store.resume_withdrawals()
         removed = store.cleanup_unpublished()
-        flash(f"已清理 {len(removed)} 个未发布文件。", "success")
+        flash(
+            f"已清理 {len(removed)} 个未发布文件；撤回回收删除 "
+            f"{len(summary['deleted'])} 个、失败 {len(summary['failed'])} 个。",
+            "success",
+        )
         return redirect(url_for("index"))
 
     def _render_detail(token: str, revision: int | None = None, errors=None, form=None, status: int = 200):
@@ -217,6 +279,10 @@ def create_app(config: dict | None = None) -> Flask:
     @app.errorhandler(RequestEntityTooLarge)
     def too_large_request(_error):
         return _render_error(f"上传内容超过 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB 上限", 413)
+
+    @app.errorhandler(WithdrawnError)
+    def withdrawn_error(error):
+        return _render_error(str(error), 410)
 
     @app.errorhandler(LabError)
     def lab_error(error):
